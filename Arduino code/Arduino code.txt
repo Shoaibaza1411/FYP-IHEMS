@@ -1,0 +1,293 @@
+/*********************
+  Home Automation System with Blynk
+  Features:
+  - AC voltage, current, power, frequency monitoring (PZEM004T)
+  - DC voltage monitoring
+  - DC current monitoring (ACS712)
+  - Temperature and humidity monitoring (DHT11)
+  - PIR motion sensor
+  - 7-channel relay control
+  - Room-based automation with manual override
+  
+  Hardware:
+  - Arduino Mega 2560
+  - ESP-01 (AT firmware, 38400 baud)
+  - PZEM004T (AC monitoring)
+  - ACS712 (DC current)
+  - Voltage divider (DC voltage)
+  - DHT11 (Temperature/Humidity)
+  - PIR motion sensor
+  - 7-channel relay module
+*********************/
+#define BLYNK_TEMPLATE_ID "TMPL6XjgjGrXf"
+#define BLYNK_TEMPLATE_NAME "ROOM 1 2 3"
+#define BLYNK_AUTH_TOKEN  "RIjGzC7x3ldGKP9tTzau3aqt_cb3_uzI"
+
+#define BLYNK_PRINT Serial
+
+#include <ESP8266_Lib.h>
+#include <BlynkSimpleShieldEsp8266.h>
+#include <PZEM004Tv30.h>
+#include <DHT.h>
+#include <SoftwareSerial.h>
+
+
+
+// WiFi credentials
+char ssid[] = "Google Wifi";
+char pass[] = "alsani305";
+
+// Hardware Serial for ESP8266 on Mega
+#define EspSerial Serial1
+#define ESP8266_BAUD 38400
+ESP8266 wifi(&EspSerial);
+
+// PZEM004T setup
+PZEM004Tv30 pzem(Serial2);  // Use Serial2 on Mega (pins 16-TX, 17-RX)
+
+// DHT11 setup
+#define DHTPIN 22
+#define DHTTYPE DHT11
+DHT dht(DHTPIN, DHTTYPE);
+
+// ACS712 setup (DC current)
+#define ACS712_PIN A0
+#define ACS712_SENSITIVITY 0.185  // 185 mV per A for 5A module
+
+// DC Voltage sensor setup
+#define VOLTAGE_PIN A1
+#define R1 30000.0  // R1 value in ohms
+#define R2 7500.0   // R2 value in ohms
+#define VREF 5.0    // Reference voltage
+
+// PIR sensor setup
+#define PIR_PIN 24
+bool pirState = false;
+bool lastPirState = false;
+
+// Relay pins (adjust according to your wiring)
+#define RELAY1 30  // Room 1 - Light
+#define RELAY2 31  // Room 1 - Fan
+#define RELAY3 32  // Room 2 - Light
+#define RELAY4 33  // Room 2 - Fan
+#define RELAY5 34  // Room 2 - AC
+#define RELAY6 35  // Room 3 - Device 1
+#define RELAY7 36  // Room 3 - Device 2
+
+// Blynk Virtual Pins
+#define ROOM1_MODE_VPIN V0
+#define ROOM1_LIGHT_VPIN V1
+#define ROOM1_FAN_VPIN V2
+
+#define ROOM2_MODE_VPIN V3
+#define ROOM2_LIGHT_VPIN V4
+#define ROOM2_FAN_VPIN V5
+#define ROOM2_AC_VPIN V6
+
+#define ROOM3_DEV1_VPIN V7
+#define ROOM3_DEV2_VPIN V8
+
+#define AC_VOLTAGE_VPIN V10
+#define AC_CURRENT_VPIN V11
+#define AC_POWER_VPIN V12
+#define AC_FREQ_VPIN V13
+#define DC_VOLTAGE_VPIN V14
+#define DC_CURRENT_VPIN V15
+#define TEMPERATURE_VPIN V16
+#define HUMIDITY_VPIN V17
+#define PIR_STATE_VPIN V18
+#define TOTAL_ENERGY_VPIN V19
+
+// Operation modes
+bool room1AutoMode = true;
+bool room2AutoMode = true;
+
+// Timing variables
+unsigned long lastSensorUpdate = 0;
+const long sensorUpdateInterval = 2000;  // Update sensors every 2 seconds
+
+void setup() {
+  Serial.begin(115200);
+  Serial2.begin(9600);  // PZEM004T uses 9600 baud
+  EspSerial.begin(ESP8266_BAUD);
+  
+  // Initialize DHT sensor
+  dht.begin();
+  
+  // Initialize PIR sensor
+  pinMode(PIR_PIN, INPUT);
+  
+  // Initialize relays
+  pinMode(RELAY1, OUTPUT);
+  pinMode(RELAY2, OUTPUT);
+  pinMode(RELAY3, OUTPUT);
+  pinMode(RELAY4, OUTPUT);
+  pinMode(RELAY5, OUTPUT);
+  pinMode(RELAY6, OUTPUT);
+  pinMode(RELAY7, OUTPUT);
+  
+  // Start with all relays off (HIGH if using active-low relay modules)
+  digitalWrite(RELAY1, HIGH);
+  digitalWrite(RELAY2, HIGH);
+  digitalWrite(RELAY3, HIGH);
+  digitalWrite(RELAY4, HIGH);
+  digitalWrite(RELAY5, HIGH);
+  digitalWrite(RELAY6, HIGH);
+  digitalWrite(RELAY7, HIGH);
+  
+  // Initialize Blynk
+  Blynk.begin(BLYNK_AUTH_TOKEN, wifi, ssid, pass);
+}
+
+void loop() {
+  Blynk.run();
+  
+  unsigned long currentMillis = millis();
+  if (currentMillis - lastSensorUpdate >= sensorUpdateInterval) {
+    lastSensorUpdate = currentMillis;
+    
+    readAndSendSensorData();
+    handleRoomAutomation();
+  }
+}
+
+void readAndSendSensorData() {
+  // Read AC parameters from PZEM004T
+  float voltage = pzem.voltage();
+  float current = pzem.current();
+  float power = pzem.power();
+  float frequency = pzem.frequency();
+  float energy = pzem.energy();
+  
+  if (!isnan(voltage)) Blynk.virtualWrite(AC_VOLTAGE_VPIN, voltage);
+  if (!isnan(current)) Blynk.virtualWrite(AC_CURRENT_VPIN, current);
+  if (!isnan(power)) Blynk.virtualWrite(AC_POWER_VPIN, power);
+  if (!isnan(frequency)) Blynk.virtualWrite(AC_FREQ_VPIN, frequency);
+  if (!isnan(energy)) Blynk.virtualWrite(TOTAL_ENERGY_VPIN, energy);
+  
+  // Read DC voltage
+  float dcVoltage = readDCVoltage();
+  Blynk.virtualWrite(DC_VOLTAGE_VPIN, dcVoltage);
+  
+  // Read DC current
+  float dcCurrent = readDCCurrent();
+  Blynk.virtualWrite(DC_CURRENT_VPIN, dcCurrent);
+  
+  // Read temperature and humidity
+  float temperature = dht.readTemperature();
+  float humidity = dht.readHumidity();
+  
+  if (!isnan(temperature)) Blynk.virtualWrite(TEMPERATURE_VPIN, temperature);
+  if (!isnan(humidity)) Blynk.virtualWrite(HUMIDITY_VPIN, humidity);
+  
+  // Read PIR sensor
+  pirState = digitalRead(PIR_PIN);
+  if (pirState != lastPirState) {
+    Blynk.virtualWrite(PIR_STATE_VPIN, pirState);
+    lastPirState = pirState;
+  }
+}
+
+float readDCVoltage() {
+  int rawValue = analogRead(VOLTAGE_PIN);
+  float voltage = (rawValue * VREF) / 1024.0;
+  voltage = voltage / (R2 / (R1 + R2));  // Voltage divider calculation
+  return voltage;
+}
+
+float readDCCurrent() {
+  int rawValue = analogRead(ACS712_PIN);
+  float voltage = (rawValue / 1024.0) * VREF;
+  float current = (voltage - (VREF / 2)) / ACS712_SENSITIVITY;
+  return current;
+}
+
+void handleRoomAutomation() {
+  // Room 1 automation (PIR controlled)
+  if (room1AutoMode) {
+    if (pirState) {
+      // Motion detected - turn on light and fan
+      digitalWrite(RELAY1, LOW);  // Light on
+      digitalWrite(RELAY2, LOW);  // Fan on
+    } else {
+      // No motion - turn off after delay (optional)
+      digitalWrite(RELAY1, HIGH);  // Light off
+      digitalWrite(RELAY2, HIGH);  // Fan off
+    }
+  }
+  
+  // Room 2 automation (temperature controlled)
+  if (room2AutoMode) {
+    float temperature = dht.readTemperature();
+    if (!isnan(temperature)) {
+      if (temperature < 20) {
+        // Below 20°C - turn off fan and AC
+        digitalWrite(RELAY4, HIGH);  // Fan off
+        digitalWrite(RELAY5, HIGH);   // AC off
+      } else if (temperature >= 20 && temperature < 40) {
+        // Between 20-40°C - fan on, AC off
+        digitalWrite(RELAY4, LOW);   // Fan on
+        digitalWrite(RELAY5, HIGH);  // AC off
+      } else {
+        // Above 40°C - fan off, AC on
+        digitalWrite(RELAY4, HIGH);  // Fan off
+        digitalWrite(RELAY5, LOW);   // AC on
+      }
+    }
+  }
+}
+
+// Blynk Virtual Pin Handlers
+
+// Room 1 Mode Toggle (Auto/Manual)
+BLYNK_WRITE(ROOM1_MODE_VPIN) {
+  room1AutoMode = param.asInt();
+}
+
+// Room 1 Manual Light Control
+BLYNK_WRITE(ROOM1_LIGHT_VPIN) {
+  if (!room1AutoMode) {
+    digitalWrite(RELAY1, param.asInt() ? LOW : HIGH);
+  }
+}
+
+// Room 1 Manual Fan Control
+BLYNK_WRITE(ROOM1_FAN_VPIN) {
+  if (!room1AutoMode) {
+    digitalWrite(RELAY2, param.asInt() ? LOW : HIGH);
+  }
+}
+
+// Room 2 Mode Toggle (Auto/Manual)
+BLYNK_WRITE(ROOM2_MODE_VPIN) {
+  room2AutoMode = param.asInt();
+}
+
+// Room 2 Manual Light Control
+BLYNK_WRITE(ROOM2_LIGHT_VPIN) {
+  digitalWrite(RELAY3, param.asInt() ? LOW : HIGH);
+}
+
+// Room 2 Manual Fan Control
+BLYNK_WRITE(ROOM2_FAN_VPIN) {
+  if (!room2AutoMode) {
+    digitalWrite(RELAY4, param.asInt() ? LOW : HIGH);
+  }
+}
+
+// Room 2 Manual AC Control
+BLYNK_WRITE(ROOM2_AC_VPIN) {
+  if (!room2AutoMode) {
+    digitalWrite(RELAY5, param.asInt() ? LOW : HIGH);
+  }
+}
+
+// Room 3 Device 1 Control
+BLYNK_WRITE(ROOM3_DEV1_VPIN) {
+  digitalWrite(RELAY6, param.asInt() ? LOW : HIGH);
+}
+
+// Room 3 Device 2 Control
+BLYNK_WRITE(ROOM3_DEV2_VPIN) {
+  digitalWrite(RELAY7, param.asInt() ? LOW : HIGH);
+}
